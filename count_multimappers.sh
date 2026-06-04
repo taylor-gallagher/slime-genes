@@ -6,34 +6,40 @@
 #SBATCH --output=%x_%A_%a.out
 #SBATCH --error=%x_%A_%a.err
 
-# Define the BED file
-BED="slime_gene_loci.bed"
+BEDTOOLS_SIF="/weka/health_sciences/bms/biochemistry/dearden_lab/galta815/bedtools/bedtools_2.31.1.sif"
+BED="clean_loci.bed"
 
-# Print header for the output CSV
-echo "Sample,Tissue,Replicate,Unique_Reads,Multi_Reads" > mapping_stats.csv
+echo "Sample,Tissue,Replicate,Locus,Unique_Reads,Multi_Reads" > mapping_stats_per_locus.csv
 
-# Loop through BAM files
 for BAM in *_sorted.bam; do
-    # Extract Sample Name, Tissue, and Rep from filename 
-    SAMPLE=$(basename "$BAM" .bam)
-    TISSUE=$(echo $SAMPLE | cut -d'_' -f1)
-    REP=$(echo $SAMPLE | cut -d'_' -f2)
+    
+    FILENAME=$(basename "$BAM" .bam)
+    TISSUE=${FILENAME:0:1}
+    REP=${FILENAME:1:1}
 
-    echo "Processing $SAMPLE..."
+    echo "Processing Sample: $FILENAME..."
 
-    samtools view -b -L "$BED" "$BAM" > temp_subset.bam
+    while read -r CHROM START END NAME; do
+        
+        [[ -z "$CHROM" || "$CHROM" == "#"* ]] && continue
 
-    # Count Unique Reads (NH=1 and Primary Alignment)
-    UNIQUE=$(samtools view -c -F 256 -e 'tag["NH"] == 1' temp_subset.bam)
+        LOCUS_ID="${NAME:-${CHROM}:${START}-${END}}"
 
-    #Count Multi-mapping Reads (NH > 1 and Primary Alignment)
-    MULTI=$(samtools view -c -F 256 -e 'tag["NH"] > 1' temp_subset.bam)
+        echo -e "$CHROM\t$START\t$END" > current_locus.bed
 
-    # Append to CSV
-    echo "$SAMPLE,$TISSUE,$REP,$UNIQUE,$MULTI" >> mapping_stats.csv
+        
+        TOTAL=$(singularity exec --bind /weka "$BEDTOOLS_SIF" bedtools intersect -abam "$BAM" -b current_locus.bed -u | samtools view -c -F 256 -)
 
-    # Clean up temp file
-    rm temp_subset.bam
+        UNIQUE=$(singularity exec --bind /weka "$BEDTOOLS_SIF" bedtools intersect -abam "$BAM" -b current_locus.bed -u | samtools view -F 256 - | grep -c "NH:i:1")
+
+        MULTI=$((TOTAL - UNIQUE))
+
+        echo "$FILENAME,$TISSUE,$REP,$LOCUS_ID,$UNIQUE,$MULTI" >> mapping_stats_per_locus.csv
+        
+        echo "  - Locus $LOCUS_ID: $TOTAL total reads ($UNIQUE unique)"
+
+    done < "$BED"
 done
 
-echo "Results saved to mapping_stats.csv"
+rm current_locus.bed
+echo "Done! Results saved to mapping_stats_per_locus.csv"
